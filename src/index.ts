@@ -6,20 +6,61 @@ import {
     CallToolRequestSchema,
     ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { google } from 'googleapis';
-import { z } from "zod";
-import { zodToJsonSchema } from "zod-to-json-schema";
-import { OAuth2Client } from 'google-auth-library';
+import dotenv from 'dotenv';
 import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import { OAuth2Client } from 'google-auth-library';
+import { gmail_v1, google } from 'googleapis';
 import http from 'http';
 import open from 'open';
 import os from 'os';
-import {createEmailMessage} from "./utl.js";
-import { createLabel, updateLabel, deleteLabel, listLabels, findLabelByName, getOrCreateLabel, GmailLabel } from "./label-manager.js";
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { z } from "zod";
+import { zodToJsonSchema } from "zod-to-json-schema";
+import { createLabel, deleteLabel, getOrCreateLabel, GmailLabel, listLabels, updateLabel } from "./label-manager.js";
+import { createEmailMessage } from "./utl.js";
+
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+const TokenSchema = z.object({
+    access_token: z.string().describe("Gmail OAuth access token"),
+    refresh_token: z.string().optional().describe("Gmail OAuth refresh token"),
+    expiry_date: z.number().optional().describe("Token expiry timestamp in milliseconds"),
+    token_type: z.string().optional().describe("Token type (usually 'Bearer')"),
+    scope: z.array(z.string()).optional().describe("OAuth token scopes")
+});
+
+function createGmailClient(tokenInfo: any) {
+    // Get client credentials from environment
+    const clientId = process.env.GMAIL_CLIENT_ID;
+    const clientSecret = process.env.GMAIL_CLIENT_SECRET;
+    const redirectUri = process.env.GMAIL_REDIRECT_URI || "http://localhost:3001/oauth2callback";
+
+    if (!clientId || !clientSecret) {
+        throw new Error('GMAIL_CLIENT_ID and GMAIL_CLIENT_SECRET must be set as environment variables');
+    }
+
+    // Create OAuth client with credentials
+    const oauth2Client = new OAuth2Client(
+        clientId,
+        clientSecret,
+        redirectUri
+    );
+
+    // Set the toen information
+    oauth2Client.setCredentials({
+        access_token: tokenInfo.access_token,
+        refresh_token: tokenInfo.refresh_token,
+        expiry_date: tokenInfo.expiry_date,
+        token_type: tokenInfo.token_type || 'Bearer',
+        scope: tokenInfo.scope || ['https://www.googleapis.com/auth/gmail.modify']
+    });
+
+    // Return Gmail API client
+    return google.gmail({ version: 'v1', auth: oauth2Client });
+}
+
 
 // Configuration paths
 const CONFIG_DIR = path.join(os.homedir(), '.gmail-mcp');
@@ -122,9 +163,9 @@ async function loadCredentials() {
             process.exit(1);
         }
 
-        const callback = process.argv[2] === 'auth' && process.argv[3] 
-        ? process.argv[3] 
-        : "http://localhost:3000/oauth2callback";
+        const callback = process.argv[2] === 'auth' && process.argv[3]
+        ? process.argv[3]
+        : "http://localhost:3001/oauth2callback";
 
         oauth2Client = new OAuth2Client(
             keys.client_id,
@@ -141,10 +182,66 @@ async function loadCredentials() {
         process.exit(1);
     }
 }
+async function authenticateAndPrintTokens() {
+    dotenv.config();
+    const clientId = process.env.GMAIL_CLIENT_ID;
+    const clientSecret = process.env.GMAIL_CLIENT_SECRET;
+    const redirectUri = "http://localhost:3001/oauth2callback";
 
+    if (!clientId || !clientSecret) {
+        throw new Error('GMAIL_CLIENT_ID and GMAIL_CLIENT_SECRET must be set as environment variables');
+    }
+
+    const oauth2Client = new OAuth2Client(clientId, clientSecret, redirectUri);
+    const server = http.createServer();
+    server.listen(3001);
+
+    return new Promise<void>((resolve, reject) => {
+        const authUrl = oauth2Client.generateAuthUrl({
+            access_type: 'offline',
+            scope: ['https://www.googleapis.com/auth/gmail.modify'],
+            prompt: 'consent'  // Force consent screen to get a refresh token
+        });
+
+        console.log('Please visit this URL to authenticate:', authUrl);
+        open(authUrl);
+
+        server.on('request', async (req, res) => {
+            if (!req.url?.startsWith('/oauth2callback')) return;
+
+            const url = new URL(req.url, 'http://localhost:3001');
+            const code = url.searchParams.get('code');
+
+            if (!code) {
+                res.writeHead(400);
+                res.end('No code provided');
+                reject(new Error('No code provided'));
+                return;
+            }
+
+            try {
+                const { tokens } = await oauth2Client.getToken(code);
+
+                // Print tokens to console for testing
+                console.log('\n\n==== OAUTH TOKENS FOR TESTING ====');
+                console.log(JSON.stringify(tokens, null, 2));
+                console.log('==== COPY THESE FOR TESTING ====\n\n');
+
+                res.writeHead(200);
+                res.end('Authentication successful! You can close this window.');
+                server.close();
+                resolve();
+            } catch (error) {
+                res.writeHead(500);
+                res.end('Authentication failed');
+                reject(error);
+            }
+        });
+    });
+}
 async function authenticate() {
     const server = http.createServer();
-    server.listen(3000);
+    server.listen(3001);
 
     return new Promise<void>((resolve, reject) => {
         const authUrl = oauth2Client.generateAuthUrl({
@@ -158,7 +255,7 @@ async function authenticate() {
         server.on('request', async (req, res) => {
             if (!req.url?.startsWith('/oauth2callback')) return;
 
-            const url = new URL(req.url, 'http://localhost:3000');
+            const url = new URL(req.url, 'http://localhost:3001');
             const code = url.searchParams.get('code');
 
             if (!code) {
@@ -188,6 +285,7 @@ async function authenticate() {
 
 // Schema definitions
 const SendEmailSchema = z.object({
+    token: TokenSchema,
     to: z.array(z.string()).describe("List of recipient email addresses"),
     subject: z.string().describe("Email subject"),
     body: z.string().describe("Email body content"),
@@ -198,16 +296,19 @@ const SendEmailSchema = z.object({
 });
 
 const ReadEmailSchema = z.object({
+    token: TokenSchema,
     messageId: z.string().describe("ID of the email message to retrieve"),
 });
 
 const SearchEmailsSchema = z.object({
+    token: TokenSchema,
     query: z.string().describe("Gmail search query (e.g., 'from:example@gmail.com')"),
     maxResults: z.number().optional().describe("Maximum number of results to return"),
 });
 
 // Updated schema to include removeLabelIds
 const ModifyEmailSchema = z.object({
+    token: TokenSchema,
     messageId: z.string().describe("ID of the email message to modify"),
     labelIds: z.array(z.string()).optional().describe("List of label IDs to apply"),
     addLabelIds: z.array(z.string()).optional().describe("List of label IDs to add to the message"),
@@ -215,20 +316,25 @@ const ModifyEmailSchema = z.object({
 });
 
 const DeleteEmailSchema = z.object({
+    token: TokenSchema,
     messageId: z.string().describe("ID of the email message to delete"),
 });
 
 // New schema for listing email labels
-const ListEmailLabelsSchema = z.object({}).describe("Retrieves all available Gmail labels");
+const ListEmailLabelsSchema = z.object({
+    token: TokenSchema,
+}).describe("Retrieves all available Gmail labels");
 
 // Label management schemas
 const CreateLabelSchema = z.object({
+    token: TokenSchema,
     name: z.string().describe("Name for the new label"),
     messageListVisibility: z.enum(['show', 'hide']).optional().describe("Whether to show or hide the label in the message list"),
     labelListVisibility: z.enum(['labelShow', 'labelShowIfUnread', 'labelHide']).optional().describe("Visibility of the label in the label list"),
 }).describe("Creates a new Gmail label");
 
 const UpdateLabelSchema = z.object({
+    token: TokenSchema,
     id: z.string().describe("ID of the label to update"),
     name: z.string().optional().describe("New name for the label"),
     messageListVisibility: z.enum(['show', 'hide']).optional().describe("Whether to show or hide the label in the message list"),
@@ -236,10 +342,12 @@ const UpdateLabelSchema = z.object({
 }).describe("Updates an existing Gmail label");
 
 const DeleteLabelSchema = z.object({
+    token: TokenSchema,
     id: z.string().describe("ID of the label to delete"),
 }).describe("Deletes a Gmail label");
 
 const GetOrCreateLabelSchema = z.object({
+    token: TokenSchema,
     name: z.string().describe("Name of the label to get or create"),
     messageListVisibility: z.enum(['show', 'hide']).optional().describe("Whether to show or hide the label in the message list"),
     labelListVisibility: z.enum(['labelShow', 'labelShowIfUnread', 'labelHide']).optional().describe("Visibility of the label in the label list"),
@@ -247,6 +355,7 @@ const GetOrCreateLabelSchema = z.object({
 
 // Schemas for batch operations
 const BatchModifyEmailsSchema = z.object({
+    token: TokenSchema,
     messageIds: z.array(z.string()).describe("List of message IDs to modify"),
     addLabelIds: z.array(z.string()).optional().describe("List of label IDs to add to all messages"),
     removeLabelIds: z.array(z.string()).optional().describe("List of label IDs to remove from all messages"),
@@ -254,22 +363,42 @@ const BatchModifyEmailsSchema = z.object({
 });
 
 const BatchDeleteEmailsSchema = z.object({
+    token: TokenSchema,
     messageIds: z.array(z.string()).describe("List of message IDs to delete"),
     batchSize: z.number().optional().default(50).describe("Number of messages to process in each batch (default: 50)"),
 });
 
 // Main function
 async function main() {
-    await loadCredentials();
+    // await loadCredentials();
 
-    if (process.argv[2] === 'auth') {
-        await authenticate();
-        console.log('Authentication completed successfully');
+    if (process.argv[2] === 'auth' && process.argv[3] === 'token') {
+        await authenticateAndPrintTokens();
+        console.log('Token generation completed successfully');
         process.exit(0);
     }
 
+    if (process.env.GMAIL_OAUTH_PATH || process.env.GMAIL_CREDENTIALS_PATH || process.argv[2] === 'auth') {
+        await loadCredentials();
+
+        if (process.argv[2] === 'auth') {
+            await authenticate();
+            console.log('Authentication completed successfully');
+            process.exit(0);
+        }
+    }
+
+
     // Initialize Gmail API
-    const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+    let gmail: gmail_v1.Gmail;
+    try {
+        // Only create if credentials exist (for backward compatibility)
+        if (oauth2Client?.credentials?.access_token) {
+            gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+        }
+    } catch (error) {
+        console.warn('No credentials found, operating in token-only mode');
+    }
 
     // Server implementation
     const server = new Server({
@@ -354,7 +483,7 @@ async function main() {
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { name, arguments: args } = request.params;
 
-        async function handleEmailAction(action: "send" | "draft", validatedArgs: any) {
+        async function handleEmailAction(action: "send" | "draft", validatedArgs: any, gmail: gmail_v1.Gmail) {
             const message = createEmailMessage(validatedArgs);
 
             const encodedMessage = Buffer.from(message).toString('base64')
@@ -416,7 +545,7 @@ async function main() {
         ): Promise<{ successes: U[], failures: { item: T, error: Error }[] }> {
             const successes: U[] = [];
             const failures: { item: T, error: Error }[] = [];
-            
+
             // Process in batches
             for (let i = 0; i < items.length; i += batchSize) {
                 const batch = items.slice(i, i + batchSize);
@@ -435,7 +564,7 @@ async function main() {
                     }
                 }
             }
-            
+
             return { successes, failures };
         }
 
@@ -444,12 +573,18 @@ async function main() {
                 case "send_email":
                 case "draft_email": {
                     const validatedArgs = SendEmailSchema.parse(args);
+
+                    const gmail = createGmailClient(validatedArgs.token)
+
                     const action = name === "send_email" ? "send" : "draft";
-                    return await handleEmailAction(action, validatedArgs);
+                    return await handleEmailAction(action, validatedArgs, gmail);
                 }
 
                 case "read_email": {
                     const validatedArgs = ReadEmailSchema.parse(args);
+
+                    const gmail = createGmailClient(validatedArgs.token)
+
                     const response = await gmail.users.messages.get({
                         userId: 'me',
                         id: validatedArgs.messageId,
@@ -515,6 +650,9 @@ async function main() {
 
                 case "search_emails": {
                     const validatedArgs = SearchEmailsSchema.parse(args);
+
+                    const gmail = createGmailClient(validatedArgs.token)
+
                     const response = await gmail.users.messages.list({
                         userId: 'me',
                         q: validatedArgs.query,
@@ -555,22 +693,24 @@ async function main() {
                 // Updated implementation for the modify_email handler
                 case "modify_email": {
                     const validatedArgs = ModifyEmailSchema.parse(args);
-                    
+
+                    const gmail = createGmailClient(validatedArgs.token)
+
                     // Prepare request body
                     const requestBody: any = {};
-                    
+
                     if (validatedArgs.labelIds) {
                         requestBody.addLabelIds = validatedArgs.labelIds;
                     }
-                    
+
                     if (validatedArgs.addLabelIds) {
                         requestBody.addLabelIds = validatedArgs.addLabelIds;
                     }
-                    
+
                     if (validatedArgs.removeLabelIds) {
                         requestBody.removeLabelIds = validatedArgs.removeLabelIds;
                     }
-                    
+
                     await gmail.users.messages.modify({
                         userId: 'me',
                         id: validatedArgs.messageId,
@@ -589,6 +729,9 @@ async function main() {
 
                 case "delete_email": {
                     const validatedArgs = DeleteEmailSchema.parse(args);
+
+                    const gmail = createGmailClient(validatedArgs.token)
+
                     await gmail.users.messages.delete({
                         userId: 'me',
                         id: validatedArgs.messageId,
@@ -627,14 +770,15 @@ async function main() {
                     const validatedArgs = BatchModifyEmailsSchema.parse(args);
                     const messageIds = validatedArgs.messageIds;
                     const batchSize = validatedArgs.batchSize || 50;
-                    
+
+                    const gmail = createGmailClient(validatedArgs.token)
                     // Prepare request body
                     const requestBody: any = {};
-                    
+
                     if (validatedArgs.addLabelIds) {
                         requestBody.addLabelIds = validatedArgs.addLabelIds;
                     }
-                    
+
                     if (validatedArgs.removeLabelIds) {
                         requestBody.removeLabelIds = validatedArgs.removeLabelIds;
                     }
@@ -661,10 +805,10 @@ async function main() {
                     // Generate summary of the operation
                     const successCount = successes.length;
                     const failureCount = failures.length;
-                    
+
                     let resultText = `Batch label modification complete.\n`;
                     resultText += `Successfully processed: ${successCount} messages\n`;
-                    
+
                     if (failureCount > 0) {
                         resultText += `Failed to process: ${failureCount} messages\n\n`;
                         resultText += `Failed message IDs:\n`;
@@ -686,6 +830,7 @@ async function main() {
                     const messageIds = validatedArgs.messageIds;
                     const batchSize = validatedArgs.batchSize || 50;
 
+                    const gmail = createGmailClient(validatedArgs.token)
                     // Process messages in batches
                     const { successes, failures } = await processBatches(
                         messageIds,
@@ -707,10 +852,10 @@ async function main() {
                     // Generate summary of the operation
                     const successCount = successes.length;
                     const failureCount = failures.length;
-                    
+
                     let resultText = `Batch delete operation complete.\n`;
                     resultText += `Successfully deleted: ${successCount} messages\n`;
-                    
+
                     if (failureCount > 0) {
                         resultText += `Failed to delete: ${failureCount} messages\n\n`;
                         resultText += `Failed message IDs:\n`;
@@ -730,6 +875,7 @@ async function main() {
                 // New label management handlers
                 case "create_label": {
                     const validatedArgs = CreateLabelSchema.parse(args);
+                    const gmail = createGmailClient(validatedArgs.token)
                     const result = await createLabel(gmail, validatedArgs.name, {
                         messageListVisibility: validatedArgs.messageListVisibility,
                         labelListVisibility: validatedArgs.labelListVisibility,
@@ -747,13 +893,14 @@ async function main() {
 
                 case "update_label": {
                     const validatedArgs = UpdateLabelSchema.parse(args);
-                    
+                    const gmail = createGmailClient(validatedArgs.token)
+
                     // Prepare request body with only the fields that were provided
                     const updates: any = {};
                     if (validatedArgs.name) updates.name = validatedArgs.name;
                     if (validatedArgs.messageListVisibility) updates.messageListVisibility = validatedArgs.messageListVisibility;
                     if (validatedArgs.labelListVisibility) updates.labelListVisibility = validatedArgs.labelListVisibility;
-                    
+
                     const result = await updateLabel(gmail, validatedArgs.id, updates);
 
                     return {
@@ -768,6 +915,7 @@ async function main() {
 
                 case "delete_label": {
                     const validatedArgs = DeleteLabelSchema.parse(args);
+                    const gmail = createGmailClient(validatedArgs.token)
                     const result = await deleteLabel(gmail, validatedArgs.id);
 
                     return {
@@ -782,13 +930,14 @@ async function main() {
 
                 case "get_or_create_label": {
                     const validatedArgs = GetOrCreateLabelSchema.parse(args);
+                    const gmail = createGmailClient(validatedArgs.token)
                     const result = await getOrCreateLabel(gmail, validatedArgs.name, {
                         messageListVisibility: validatedArgs.messageListVisibility,
                         labelListVisibility: validatedArgs.labelListVisibility,
                     });
 
                     const action = result.type === 'user' && result.name === validatedArgs.name ? 'found existing' : 'created new';
-                    
+
                     return {
                         content: [
                             {

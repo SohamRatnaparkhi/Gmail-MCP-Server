@@ -29,3 +29,7 @@ gcp-oauth.keys.json
 .calendar-mcp/
 credentials.json
 .calendar-server-credentials.json 
+
+gmail_tokens.json
+
+venv

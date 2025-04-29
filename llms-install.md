@@ -20,7 +20,7 @@ This guide will help you install and configure the Gmail AutoAuth MCP server for
       - Go to "APIs & Services" > "Credentials"
       - Click "Create Credentials" > "OAuth client ID"
       - Choose "Desktop app" or "Web application" type
-      - For Web application, add http://localhost:3000/oauth2callback to redirect URIs
+      - For Web application, add http://localhost:3001/oauth2callback to redirect URIs
       - Download the OAuth keys JSON file
       - Rename it to gcp-oauth.keys.json
    ```
@@ -67,7 +67,7 @@ If you encounter any issues during installation:
 2. Authentication Errors:
    - Confirm Gmail API is enabled
    - For web applications, verify redirect URI configuration
-   - Check port 3000 is available during authentication
+   - Check port 3001 is available during authentication
 
 3. Configuration Issues:
    - Verify ~/.gmail-mcp directory exists and has correct permissions

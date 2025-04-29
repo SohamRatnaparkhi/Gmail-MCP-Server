@@ -36,3 +36,8 @@ coverage/
 # Misc
 .DS_Store
 Thumbs.db 
+
+
+gmail_tokens.json
+
+venv

@@ -48,7 +48,7 @@ npx -y @smithery/cli install @gongrzhe/server-gmail-autoauth-mcp --client claude
       - Click "Create Credentials" > "OAuth client ID"
       - Choose either "Desktop app" or "Web application" as application type
       - Give it a name and click "Create"
-      - For Web application, add `http://localhost:3000/oauth2callback` to the authorized redirect URIs
+      - For Web application, add `http://localhost:3001/oauth2callback` to the authorized redirect URIs
       - Download the JSON file of your client's OAuth keys
       - Rename the key file to `gcp-oauth.keys.json`
 
@@ -79,10 +79,10 @@ npx -y @smithery/cli install @gongrzhe/server-gmail-autoauth-mcp --client claude
    - Open your default browser for Google authentication
    - Save credentials as `~/.gmail-mcp/credentials.json`
 
-   > **Note**: 
+   > **Note**:
    > - After successful authentication, credentials are stored globally in `~/.gmail-mcp/` and can be used from any directory
    > - Both Desktop app and Web application credentials are supported
-   > - For Web application credentials, make sure to add `http://localhost:3000/oauth2callback` to your authorized redirect URIs
+   > - For Web application credentials, make sure to add `http://localhost:3001/oauth2callback` to your authorized redirect URIs
 
 3. Configure in Claude Desktop:
 
@@ -110,7 +110,7 @@ docker run -i --rm \
   -v mcp-gmail:/gmail-server \
   -e GMAIL_OAUTH_PATH=/gcp-oauth.keys.json \
   -e "GMAIL_CREDENTIALS_PATH=/gmail-server/credentials.json" \
-  -p 3000:3000 \
+  -p 3001:3001 \
   mcp/gmail auth
 ```
 
@@ -398,7 +398,7 @@ The server includes efficient batch processing capabilities:
    - For web applications, verify the redirect URI is correctly configured
 
 3. **Port Already in Use**
-   - If port 3000 is already in use, please free it up before running authentication
+   - If port 3001 is already in use, please free it up before running authentication
    - You can find and stop the process using that port
 
 4. **Batch Operation Failures**
