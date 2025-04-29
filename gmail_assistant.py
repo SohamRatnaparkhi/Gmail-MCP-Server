@@ -3,7 +3,9 @@ import json
 import os
 import sys
 import uuid
-from typing import Dict, Any, List, Optional
+import re
+import requests
+from typing import Dict, Any, List, Optional, Union
 from contextlib import AsyncExitStack
 
 from mcp import ClientSession, StdioServerParameters
@@ -35,7 +37,6 @@ class GmailMCPClient:
     def __init__(self, tokens_file: str = TOKENS_FILE):
         """Initialize the Gmail MCP client with OAuth tokens."""
         self.tokens = self._load_tokens(tokens_file)
-        print("Tokens: ", self.tokens)
         self.session = None
         self.exit_stack = AsyncExitStack()
         self.tools_cache = None
@@ -130,15 +131,136 @@ class GmailAssistant:
 
         self.tools = anthropic_tools
 
-        for tool in anthropic_tools:
-            print("Tool: ", tool, " \n\n")
         return anthropic_tools
 
+    async def check_email_recipients(self, query: str) -> Dict[str, Any]:
+        """Check if the query is an email request with insufficient recipient information."""
+        # Use Claude to analyze if this is an email request and if it has sufficient recipient info
+        analysis = anthropic_client.messages.create(
+            model="claude-3-5-sonnet-20241022",
+            max_tokens=500,
+            messages=[{
+                "role": "user",
+                "content": f"Analyze this query related to email: '{query}'. Is this a request to draft or send an email? If yes, does it have a valid email recipient (a proper email address)? If it has a name or designation but not a valid email address, extract that information. Respond in JSON format only."
+            }],
+            system="""You analyze email-related queries to determine if they have sufficient recipient information.
+            
+            Return a JSON object with the following structure:
+            {
+                "is_email_request": boolean,  // true if this is a request to draft or send an email
+                "has_valid_recipient": boolean,  // true if it contains a valid email address
+                "missing_param": {  // include this ONLY if is_email_request is true AND has_valid_recipient is false
+                    "to": {  // information about the recipient
+                        "name": string,  // the name of the recipient if mentioned
+                        "designation": string  // the job title or role if mentioned instead of name
+                        "original_query": string  // the original query that was analyzed
+                    }
+                }
+            }
+            
+            Examples:
+            1. For "email soham how is he?": {"is_email_request": true, "has_valid_recipient": false, "missing_param": {"to": {"name": "Soham", "original_query": "email soham how is he?"}}}
+            2. For "email ceo of my company, hello": {"is_email_request": true, "has_valid_recipient": false, "missing_param": {"to": {"designation": "CEO", "original_query": "email ceo of my company, hello"}}}
+            3. For "what's the weather": {"is_email_request": false
+            4. For "email john@example.com": {"is_email_request": true, "has_valid_recipient": true}
+            
+            Be precise in your analysis and follow this format exactly.""",
+            # response_format={"type": "json_object"}
+        )
+        
+        try:
+            result = json.loads(analysis.content[0].text)
+            # Ensure the result has the expected structure
+            if result.get("is_email_request", False) and not result.get("has_valid_recipient", True):
+                # Make sure missing_param follows the expected format
+                if "missing_param" not in result:
+                    result["missing_param"] = {}
+                    
+                if "to" not in result["missing_param"]:
+                    result["missing_param"]["to"] = {}
+                    
+                # Ensure at least one of name or designation is present
+                missing_to = result["missing_param"]["to"]
+                if not ("name" in missing_to or "designation" in missing_to):
+                    # Try to extract a name from the query if possible
+                    words = query.split()
+                    for word in words:
+                        if word[0].isupper() and len(word) > 2 and word.lower() not in ["email", "send", "draft", "write"]:
+                            missing_to["name"] = word
+                            break
+                    result["missing_param"]["to"] = missing_to
+                if "original_query" not in result["missing_param"]:
+                    result["missing_param"]["original_query"] = query
+            return result
+        except (json.JSONDecodeError, IndexError, KeyError) as e:
+            print(f"Error parsing email analysis: {str(e)}")
+            # Default return if parsing fails
+            return {"is_email_request": False, "has_valid_recipient": False}
+    
+    async def search_email_addresses(self, query_params: Dict[str, Any]) -> List[Dict[str, str]]:
+        """Search for email addresses based on query parameters."""
+        try:
+            response = requests.post(
+                "http://localhost:8000/search_mcp",
+                json=query_params,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                resp = response.json()
+                print("Email search successful", resp)
+                return resp.get("to", [])
+            else:
+                print(f"Error searching emails: {response.status_code} - {response.text}")
+                return []
+        except Exception as e:
+            print(f"Exception searching emails: {str(e)}")
+            return []
+    
     async def process_query(self, query: str) -> str:
         """Process a user query using Anthropic Claude and available tools."""
         # Make sure tools are prepared
         if self.tools is None:
             await self._prepare_tools()
+            
+        # First check if this is an email request with insufficient recipient info
+        email_check = await self.check_email_recipients(query)
+        
+        if email_check.get("is_email_request", False) and not email_check.get("has_valid_recipient", True):
+            # We have an email request with insufficient recipient info
+            missing_param = email_check.get("missing_param", {})
+            
+            if missing_param and ("name" in missing_param.get("to", {}) or "designation" in missing_param.get("to", {})):
+                # We have a name or designation, search for matching email addresses
+                search_results = await self.search_email_addresses(missing_param) 
+                print("Search results:", search_results)
+                
+                if len(search_results) == 0:
+                    # No results found
+                    query = "I couldn't find any email addresses matching that recipient. Please provide a valid email address."
+                elif len(search_results) == 1:
+                    # Just one result, proceed with it
+                    recipient_email = search_results[0].get("email")
+                    query = f"Send an email to {recipient_email}: {query}"
+                else:
+                    # Multiple results, ask user to choose
+                    formatted_results = "\n".join([f"{i+1}. {r.get('name', 'Unknown')} ({r.get('email')})" for i, r in enumerate(search_results)])
+                    
+                    # Create a special message for Claude to handle multiple recipient options
+                    self.message_history.append({
+                        "role": "user",
+                        "content": query
+                    })
+                    
+                    self.message_history.append({
+                        "role": "assistant",
+                        "content": f"I found multiple possible email addresses for your recipient:\n\n{formatted_results}\n\nWhich one would you like to use?"
+                    })
+                    
+                    return f"I found multiple possible email addresses for your recipient:\n\n{formatted_results}\n\nWhich one would you like to use?"
+            else:
+                # No name or designation provided
+                return "To send an email, please specify a recipient email address or at least a name or designation."
 
         # Add user query to message history
         self.message_history.append({
