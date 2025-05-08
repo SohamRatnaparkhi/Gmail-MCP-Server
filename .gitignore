@@ -33,3 +33,6 @@ credentials.json
 gmail_tokens.json
 
 venv
+token.json
+gmailclient.py
+gmail_assistant.py

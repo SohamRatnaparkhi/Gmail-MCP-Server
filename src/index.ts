@@ -31,7 +31,7 @@ const TokenSchema = z.object({
     scope: z.array(z.string()).optional().describe("OAuth token scopes")
 });
 
-function createGmailClient(tokenInfo: any) {
+async function createGmailClient(tokenInfo: any) {
     // Get client credentials from environment
     const clientId = process.env.GMAIL_CLIENT_ID;
     const clientSecret = process.env.GMAIL_CLIENT_SECRET;
@@ -56,6 +56,15 @@ function createGmailClient(tokenInfo: any) {
         token_type: tokenInfo.token_type || 'Bearer',
         scope: tokenInfo.scope || ['https://www.googleapis.com/auth/gmail.modify']
     });
+
+    const expiryDate = oauth2Client.credentials.expiry_date;
+    const isExpired = expiryDate ? Date.now() >= (expiryDate - 5 * 60 * 1000) : false;
+
+    if (isExpired && oauth2Client.credentials.refresh_token) {
+        // Refresh the token
+        const response = await oauth2Client.refreshAccessToken();
+        oauth2Client.setCredentials(response.credentials);
+    }
 
     // Return Gmail API client
     return google.gmail({ version: 'v1', auth: oauth2Client });
@@ -574,7 +583,7 @@ async function main() {
                 case "draft_email": {
                     const validatedArgs = SendEmailSchema.parse(args);
 
-                    const gmail = createGmailClient(validatedArgs.token)
+                    const gmail = await createGmailClient(validatedArgs.token)
 
                     const action = name === "send_email" ? "send" : "draft";
                     return await handleEmailAction(action, validatedArgs, gmail);
@@ -583,7 +592,7 @@ async function main() {
                 case "read_email": {
                     const validatedArgs = ReadEmailSchema.parse(args);
 
-                    const gmail = createGmailClient(validatedArgs.token)
+                    const gmail = await createGmailClient(validatedArgs.token)
 
                     const response = await gmail.users.messages.get({
                         userId: 'me',
@@ -651,7 +660,7 @@ async function main() {
                 case "search_emails": {
                     const validatedArgs = SearchEmailsSchema.parse(args);
 
-                    const gmail = createGmailClient(validatedArgs.token)
+                    const gmail = await createGmailClient(validatedArgs.token)
 
                     const response = await gmail.users.messages.list({
                         userId: 'me',
@@ -694,7 +703,7 @@ async function main() {
                 case "modify_email": {
                     const validatedArgs = ModifyEmailSchema.parse(args);
 
-                    const gmail = createGmailClient(validatedArgs.token)
+                    const gmail = await createGmailClient(validatedArgs.token)
 
                     // Prepare request body
                     const requestBody: any = {};
@@ -730,7 +739,7 @@ async function main() {
                 case "delete_email": {
                     const validatedArgs = DeleteEmailSchema.parse(args);
 
-                    const gmail = createGmailClient(validatedArgs.token)
+                    const gmail = await createGmailClient(validatedArgs.token)
 
                     await gmail.users.messages.delete({
                         userId: 'me',
@@ -771,7 +780,7 @@ async function main() {
                     const messageIds = validatedArgs.messageIds;
                     const batchSize = validatedArgs.batchSize || 50;
 
-                    const gmail = createGmailClient(validatedArgs.token)
+                    const gmail = await createGmailClient(validatedArgs.token)
                     // Prepare request body
                     const requestBody: any = {};
 
@@ -830,7 +839,7 @@ async function main() {
                     const messageIds = validatedArgs.messageIds;
                     const batchSize = validatedArgs.batchSize || 50;
 
-                    const gmail = createGmailClient(validatedArgs.token)
+                    const gmail = await createGmailClient(validatedArgs.token)
                     // Process messages in batches
                     const { successes, failures } = await processBatches(
                         messageIds,
