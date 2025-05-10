@@ -35,7 +35,7 @@ async function createGmailClient(tokenInfo: any) {
     // Get client credentials from environment
     const clientId = process.env.GMAIL_CLIENT_ID;
     const clientSecret = process.env.GMAIL_CLIENT_SECRET;
-    const redirectUri = process.env.GMAIL_REDIRECT_URI || "http://localhost:3001/oauth2callback";
+    const redirectUri = process.env.GMAIL_REDIRECT_URI || "http://localhost:3000/mcp?provider=gmail";
 
     if (!clientId || !clientSecret) {
         throw new Error('GMAIL_CLIENT_ID and GMAIL_CLIENT_SECRET must be set as environment variables');
